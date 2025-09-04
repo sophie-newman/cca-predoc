@@ -4,7 +4,7 @@
 
 # Generate LFs from SC-SAM
 
-For a given physical parameters $\theta_{phys}$
+For given physical parameters $\theta_{phys}$
 
 # Vary parameters
 
@@ -14,4 +14,4 @@ Using synthesizer, vary:
 
 # Perform inference
 
-Learn $\theta_{phys}$, $\theta_{AGN}$, $\theta_{dust}$
+Learn $\theta_{phys}$ , $\theta_{AGN}$ , $\theta_{dust}$
