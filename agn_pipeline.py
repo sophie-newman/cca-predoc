@@ -21,7 +21,7 @@ from synthesizer.emission_models import (
 from synthesizer.particle.galaxy import Galaxy as ParticleGalaxy
 from synthesizer.particle.stars import Stars as ParticleStars
 from synthesizer.particle import BlackHoles
-from synthesizer.pipeline import Pipeline
+from synthesizer.pipeline import Pipeline, combine_files_virtual
 
 # Define subvolumes
 subvolumes = [
@@ -84,24 +84,27 @@ def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx
 
     return gal
 
-def get_galaxies(subvol="0_0_0", N=None):
-    """Load galaxies for a given subvolume (or all subvolumes)"""
+def get_galaxies(subvol="0_0_0", N=None, comm=None):
+    """Load galaxies for a given subvolume (or all subvolumes),
+    distributed across MPI ranks."""
+
+    rank = comm.Get_rank() if comm else 0
+    size = comm.Get_size() if comm else 1
 
     bh_mass, bh_mdot, redshift = [], [], []
     sfh, z_hist, sfh_t_bins = [], [], []
     sv = subvol
 
     with h5py.File(f'{sam_dir}/volume.hdf5', 'r') as file:
-
         bh_mass_sub = file[f'{sv}/Galprop/GalpropMBH'][:]
         bh_mdot_sub = file[f'{sv}/Galprop/GalpropMaccdot_bright'][:]
-        bh_pos_sub = file[f'{sv}/Galprop/GalpropPos'][:]
-        
+
         sfh.append(file[f'{sv}/Histprop/HistpropSFH'][:])
         z_hist.append(file[f'{sv}/Histprop/HistpropZt'][:])
 
         to_gal_prop = file[f'{sv}/Linkprop/LinkproptoGalprop'][:]
         redshift.append(file[f'{subvol}/Linkprop/LinkpropRedshift'][:])
+
         for i in to_gal_prop:
             bh_mass.append(bh_mass_sub[i])
             bh_mdot.append(bh_mdot_sub[i])
@@ -111,9 +114,26 @@ def get_galaxies(subvol="0_0_0", N=None):
         z_hist = np.concatenate(z_hist)
         redshift = np.concatenate(redshift)
 
-    indices = np.arange(len(bh_mass))
+    all_indices = np.arange(len(bh_mass))
+
+    # Case 1: User requested a total of N galaxies
     if N:
-        indices = np.random.choice(indices, size=N, replace=False)
+        if rank == 0:
+            sampled_indices = np.random.choice(all_indices, size=N, replace=False)
+        else:
+            sampled_indices = None
+        indices = comm.bcast(sampled_indices, root=0)
+
+    # Case 2: Default (no N) → take all galaxies
+    else:
+        indices = all_indices
+
+    # Split indices evenly across MPI ranks
+    my_indices = np.array_split(indices, size)[rank]
+
+    # Debug print
+    print(f"Rank {rank}/{size}: processing {len(my_indices)} galaxies "
+          f"(total {len(indices)})")
 
     galaxies = [
         get_single_galaxy(SFH=sfh[i],
@@ -123,18 +143,19 @@ def get_galaxies(subvol="0_0_0", N=None):
                           bh_mdot=bh_mdot[i],
                           z=redshift[i],
                           to_gal_prop_idx=to_gal_prop[i])
-        for i in indices
+        for i in my_indices
     ]
+
     return galaxies
 
 def emission_model():
     """Define combined emission model using loaded grids."""
 
     stellar_incident = StellarEmissionModel(
-        "stellar_incident", grid=grid_sps, extract="incident", fesc=0.3
+        "stellar_incident", grid=grid_sps, extract="incident", fesc=1.0
     )
     agn_incident = BlackHoleEmissionModel(
-        "agn_incident", grid=grid, extract="incident", fesc=0.3
+        "agn_incident", grid=grid, extract="incident", fesc=1.0
     )
     combined_emission = GalaxyEmissionModel(
         "total", combine=(stellar_incident, agn_incident)
@@ -145,7 +166,8 @@ def emission_model():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Derive synthetic observations for SC-SAM.")
     parser.add_argument("--nthreads", type=int, default=1)
-    parser.add_argument("--N", type=int, default=None)
+    # Total N of galaxies to process, randomly chosen
+    parser.add_argument("--N", type=int, default=None) 
     parser.add_argument("--subvol", type=str, default="0_0_0")
     args = parser.parse_args()
 
@@ -160,7 +182,7 @@ if __name__ == "__main__":
 
     # Load galaxies
     read_start = time.time()
-    galaxies = get_galaxies(subvol=subvolume)
+    galaxies = get_galaxies(subvol=subvolume, N=N, comm=comm)
     read_end = time.time()
     print(f"Rank {rank}: Creating {len(galaxies)} galaxies took {read_end - read_start:.2f} s")
 
@@ -177,7 +199,12 @@ if __name__ == "__main__":
     pipeline.add_analysis_func(lambda gal: gal.redshift, "Redshift")
     pipeline.add_analysis_func(lambda gal: gal.bh_mass, "BlackHoleMass")
     pipeline.add_analysis_func(lambda gal: gal.accretion_rate, "AccretionRate")
-    pipeline.add_analysis_func(lambda gal: gal.sfh_to_gal_prop, "GalPropIndex")
+    pipeline.add_analysis_func(lambda gal: gal.to_gal_prop_idx, "GalPropIndex")
 
     pipeline.run()
     pipeline.write(f"/mnt/home/snewman/ceph/pipeline_results/pipeline_no_dust_{subvolume}.hdf5", verbose=0)
+
+    # Combine outputs (rank 0 only)
+    #if rank == 0 and comm:
+    #    combine_files_virtual("pipeline_no_dust_combined.hdf5", "output_rank*.hdf5")
+    #    print("Combined output written to output_combined.hdf5")
