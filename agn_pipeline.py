@@ -1,3 +1,9 @@
+""" Run Synthesizer pipeline with different AGN model
+e.g. mpirun -np 5 python agn_pipeline.py --nthreads 4 --subvol "0_0_1"
+
+Working well with 200 GB, 20 core job, 5 ranks, 4 threads.
+"""
+
 import argparse
 import os
 import time
@@ -21,17 +27,17 @@ from synthesizer.emission_models import (
 from synthesizer.particle.galaxy import Galaxy as ParticleGalaxy
 from synthesizer.particle.stars import Stars as ParticleStars
 from synthesizer.particle import BlackHoles
-from synthesizer.pipeline import Pipeline, combine_files_virtual
+from synthesizer.pipeline import Pipeline #, combine_files_virtual
 
 # Define subvolumes
 subvolumes = [
-    "0_0_0",
-    "0_0_1",
-    "0_1_0",
-    "0_1_1",
-    "1_0_0",
-    "1_0_1",
-    "1_1_0",
+    "0_0_0", #
+    "0_0_1", #
+    "0_1_0", #
+    "0_1_1", #
+    "1_0_0", #
+    "1_0_1", #
+    "1_1_0", #
     "1_1_1"
 ]
 
