@@ -9,10 +9,12 @@ import os
 import time
 import numpy as np
 import h5py
-from unyt import angstrom, Msun, yr
+from unyt import angstrom, Msun, yr, deg
 from astropy.cosmology import Planck15 as cosmo
 from mpi4py import MPI
 import multiprocessing as mp
+import random
+import math
 
 # Synthesizer imports
 from synthesizer import check_openmp
@@ -43,16 +45,15 @@ subvolumes = [
 
 sam_dir = '/mnt/ceph/users/lperez/AGNmodelingSCSAM/sam_newAGNcode_forestmgmt_fidSAM'
 grid_dir = '/mnt/ceph/users/snewman/grids'
-grid_name = 'qsosed-test.hdf5'
+grid_name = 'qsosed.hdf5'
 grid_sps_name = 'bpass-2.2.1-bin_bpl-0.1,1.0,300.0-1.3,2.35.hdf5'
 
 # Load grids
-grid = Grid(grid_dir=grid_dir, grid_name=grid_name, ignore_lines=True)
+grid_agn = Grid(grid_dir=grid_dir, grid_name=grid_name, ignore_lines=True)
 grid_sps = Grid(grid_dir=grid_dir, grid_name=grid_sps_name, ignore_lines=True)
 
 # Interpolate grids onto new, shared wavelength array
-new_lams = np.logspace(-2, 5, 10000) * angstrom
-grid.interp_spectra(new_lam=new_lams)
+new_lams = grid_agn.lam
 grid_sps.interp_spectra(new_lam=new_lams)
 
 def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx):
@@ -75,18 +76,23 @@ def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx
                           metallicities=p_Z)
 
     black_holes = BlackHoles(
-        masses=np.array([bh_mass]) * 1e9 * Msun,
-        accretion_rates=np.array([bh_mdot]) * Msun/yr,
-        redshift=np.array([z])
+        masses = np.array([bh_mass]) * 1e9 * Msun,
+        accretion_rates = np.array([bh_mdot]) * Msun/yr
     )
+
+    # Pick a random cosine inclination between 0.1 and 0.98
+    cosine_inc = random.uniform(0.1, 0.98)
+
+    # Convert to inclination in degrees
+    inc_deg = math.acos(cosine_inc) * (180 / math.pi)
+
+    black_holes.inclination = inc_deg * deg 
 
     gal = ParticleGalaxy(
         redshift = z,
-        bh_mass = bh_mass,
-        accretion_rate = bh_mdot,
         to_gal_prop_idx = to_gal_prop_idx,
-        stars=stars, 
-        black_holes=black_holes)
+        stars = stars, 
+        black_holes = black_holes)
 
     return gal
 
@@ -161,7 +167,7 @@ def emission_model():
         "stellar_incident", grid=grid_sps, extract="incident", fesc=1.0
     )
     agn_incident = BlackHoleEmissionModel(
-        "agn_incident", grid=grid, extract="incident", fesc=1.0
+        "agn_incident", grid=grid_agn, extract="incident", fesc=1.0
     )
     combined_emission = GalaxyEmissionModel(
         "total", combine=(stellar_incident, agn_incident)
@@ -203,8 +209,9 @@ if __name__ == "__main__":
 
     # Add galaxy info
     pipeline.add_analysis_func(lambda gal: gal.redshift, "Redshift")
-    pipeline.add_analysis_func(lambda gal: gal.bh_mass, "BlackHoleMass")
-    pipeline.add_analysis_func(lambda gal: gal.accretion_rate, "AccretionRate")
+    pipeline.add_analysis_func(lambda gal: gal.black_holes.mass, "BlackHoleMass")
+    pipeline.add_analysis_func(lambda gal: gal.black_holes.accretion_rate, "AccretionRate")
+    pipeline.add_analysis_func(lambda gal: gal.black_holes.inclination, "InclinationDeg")
     pipeline.add_analysis_func(lambda gal: gal.to_gal_prop_idx, "GalPropIndex")
 
     pipeline.run()
