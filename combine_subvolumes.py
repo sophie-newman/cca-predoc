@@ -8,14 +8,13 @@ import numpy as np
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# -------------------------
-# CONFIG
-# -------------------------
+# Input/output directories
 indir = "/mnt/home/snewman/ceph/pipeline_results"
 outdir = os.path.join(indir, "combined")
 os.makedirs(outdir, exist_ok=True)
 
-pattern = re.compile(r"pipeline_no_dust_(\d+)_(\d+)_(\d+)_(\d+)\.hdf5")
+# Example file: pipeline_no_dust_0_0_0_bhmasscut_3.hdf5
+pattern = re.compile(r"pipeline_no_dust_(\d+_\d+_\d+)_bhmasscut_(\d+)\.hdf5")
 
 # Dataset to check for consistency
 reference_dataset = "Galaxies/AccretionRate"
@@ -27,7 +26,7 @@ subvolumes = defaultdict(list)
 for fname in os.listdir(indir):
     match = pattern.match(fname)
     if match:
-        subvol = "_".join(match.groups()[:3])
+        subvol, rank = match.groups()
         subvolumes[subvol].append(os.path.join(indir, fname))
 
 print(f"Found {len(subvolumes)} subvolumes.")
@@ -110,19 +109,19 @@ def combine_files(infiles, outfile, check_dataset, chunk_size=10000):
 # Parallel merging
 # -------------------------
 def process_subvolume(subvol, files):
-    files.sort(key=lambda f: int(pattern.match(os.path.basename(f)).group(4)))
-    outfile = os.path.join(outdir, f"pipeline_no_dust_{subvol}.hdf5")
+    # Sort by rank (second capture group in regex)
+    files.sort(key=lambda f: int(pattern.match(os.path.basename(f)).group(2)))
+    outfile = os.path.join(outdir, f"pipeline_no_dust_{subvol}_bhmasscut.hdf5")
     print(f"Combining {len(files)} ranks -> {outfile}")
     combine_files(files, outfile, reference_dataset, chunk_size=10000)
     return outfile
 
-test_subvol = "0_0_0"  # None or "0_0_0" for testing a single subvolume
+test_subvol = None  # set "0_0_0" for testing a single subvolume
 
 if test_subvol:
     process_subvolume(test_subvol, subvolumes[test_subvol])
 else:
-    # Use ThreadPoolExecutor to process subvolumes in parallel
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(process_subvolume, sv, files) for sv, files in subvolumes.items()]
         for future in as_completed(futures):
-            future.result()  # raises exceptions if any
+            future.result()

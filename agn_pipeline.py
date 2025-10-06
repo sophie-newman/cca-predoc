@@ -1,5 +1,5 @@
 """ Run Synthesizer pipeline with different AGN model
-e.g. mpirun -np 5 python agn_pipeline.py --nthreads 4 --subvol "0_0_1"
+e.g. mpirun -np 5 python agn_pipeline.py --nthreads 4 --subvol "0_0_0"
 
 Working well with 200 GB, 20 core job, 5 ranks, 4 threads.
 """
@@ -103,28 +103,34 @@ def get_galaxies(subvol="0_0_0", N=None, comm=None):
     rank = comm.Get_rank() if comm else 0
     size = comm.Get_size() if comm else 1
 
-    bh_mass, bh_mdot, redshift = [], [], []
-    sfh, z_hist, sfh_t_bins = [], [], []
     sv = subvol
 
     with h5py.File(f'{sam_dir}/volume.hdf5', 'r') as file:
-        bh_mass_sub = file[f'{sv}/Galprop/GalpropMBH'][:]
+
+        # Load properties
+        bh_mass_sub = file[f'{sv}/Galprop/GalpropMBH'][:] * 1e9
         bh_mdot_sub = file[f'{sv}/Galprop/GalpropMaccdot_bright'][:]
 
-        sfh.append(file[f'{sv}/Histprop/HistpropSFH'][:])
-        z_hist.append(file[f'{sv}/Histprop/HistpropZt'][:])
+        sfh = file[f'{sv}/Histprop/HistpropSFH'][:]
+        z_hist = file[f'{sv}/Histprop/HistpropZt'][:]
 
         to_gal_prop = file[f'{sv}/Linkprop/LinkproptoGalprop'][:]
-        redshift.append(file[f'{subvol}/Linkprop/LinkpropRedshift'][:])
-
-        for i in to_gal_prop:
-            bh_mass.append(bh_mass_sub[i])
-            bh_mdot.append(bh_mdot_sub[i])
+        redshift = file[f'{sv}/Linkprop/LinkpropRedshift'][:]
 
         sfh_t_bins = file[f'{sv}/Header/SFH_tbins'][:]
-        sfh = np.vstack(sfh)
-        z_hist = np.concatenate(z_hist)
-        redshift = np.concatenate(redshift)
+
+        # Align galaxy properties using mapping
+        bh_mass = bh_mass_sub[to_gal_prop]
+        bh_mdot = bh_mdot_sub[to_gal_prop]
+
+    # Apply BH mass cut (M_BH > 1e6)
+    mass_cut = bh_mass > 1e6
+
+    bh_mass = bh_mass[mass_cut]
+    bh_mdot = bh_mdot[mass_cut]
+    redshift = redshift[mass_cut]
+    sfh = sfh[mass_cut]
+    z_hist = z_hist[mass_cut]
 
     all_indices = np.arange(len(bh_mass))
 
@@ -215,9 +221,4 @@ if __name__ == "__main__":
     pipeline.add_analysis_func(lambda gal: gal.to_gal_prop_idx, "GalPropIndex")
 
     pipeline.run()
-    pipeline.write(f"/mnt/home/snewman/ceph/pipeline_results/pipeline_no_dust_{subvolume}.hdf5", verbose=0)
-
-    # Combine outputs (rank 0 only)
-    #if rank == 0 and comm:
-    #    combine_files_virtual("pipeline_no_dust_combined.hdf5", "output_rank*.hdf5")
-    #    print("Combined output written to output_combined.hdf5")
+    pipeline.write(f"/mnt/home/snewman/ceph/pipeline_results/pipeline_no_dust_{subvolume}_bhmasscut.hdf5", verbose=0)
