@@ -14,7 +14,7 @@ outdir = os.path.join(indir, "combined")
 os.makedirs(outdir, exist_ok=True)
 
 # Example file: pipeline_no_dust_0_0_0_bhmasscut_3.hdf5
-name = "pipeline_nodust_mdotcut_subradio"
+name = "pipeline_fixed_li08"
 pattern = re.compile(rf"{name}_(\d+_\d+_\d+)_(\d+)\.hdf5")
 
 # Dataset to check for consistency
