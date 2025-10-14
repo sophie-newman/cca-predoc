@@ -14,8 +14,9 @@ outdir = os.path.join(indir, "combined")
 os.makedirs(outdir, exist_ok=True)
 
 # Example file: pipeline_no_dust_0_0_0_bhmasscut_3.hdf5
-name = "pipeline_fixed_li08"
-pattern = re.compile(rf"{name}_(\d+_\d+_\d+)_(\d+)\.hdf5")
+name = "pipeline_li08"
+lhc_index = "4"
+pattern = re.compile(rf"{name}_(\d+_\d+_\d+)_lhcindex{lhc_index}_(\d+)\.hdf5")
 
 # Dataset to check for consistency
 reference_dataset = "Galaxies/AccretionRate"
@@ -112,7 +113,7 @@ def combine_files(infiles, outfile, check_dataset, chunk_size=10000):
 def process_subvolume(subvol, files):
     # Sort by rank (second capture group in regex)
     files.sort(key=lambda f: int(pattern.match(os.path.basename(f)).group(2)))
-    outfile = os.path.join(outdir, f"{name}_{subvol}.hdf5")
+    outfile = os.path.join(outdir, f"{name}_{subvol}_lhcindex{lhc_index}.hdf5")
     print(f"Combining {len(files)} ranks -> {outfile}")
     combine_files(files, outfile, reference_dataset, chunk_size=10000)
     return outfile

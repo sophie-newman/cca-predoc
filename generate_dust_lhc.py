@@ -4,8 +4,8 @@ from scipy.stats import qmc
 # Dust priors
 LHC_RANGES = {
     'UV_slope': [0, 50.0], # c1
-    'FUV_slope': [-1, 75], # c3
-    'bump': [0, 0.06], # c4
+    'FUV_slope': [-2, 6], # c3
+    'bump': [0, 0.24], # c4
 }
 
 DUST_PARAMS = list(LHC_RANGES.keys())

@@ -1,5 +1,5 @@
 """ Run Synthesizer pipeline with different AGN model
-e.g. mpirun -np 5 python pipeline_with_li08.py --nthreads 4 --subvol "0_0_0"
+e.g. mpirun -np 5 python pipeline_with_li08.py --nthreads 4 --subvol "0_0_0" --sample_index 0
 
 Working well with 200 GB, 20 core job, 5 ranks, 4 threads.
 """
