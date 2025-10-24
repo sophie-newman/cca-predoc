@@ -134,79 +134,76 @@ def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx
     return gal
 
 
-def get_galaxies(subvol="0_0_0", N=None, comm=None):
-    """Load galaxies for a given subvolume (or all subvolumes),
-    distributed across MPI ranks."""
+def get_galaxies(sfh_file, galprop_file, N=None, comm=None):
+    """
+    Load galaxies using SFH .dat and corresponding galprop .dat for non-SFH properties.
+    Returns a list of ParticleGalaxy objects.
+    """
+    # Load SFH data
+    sfh_dicts, age_lst = get_sfh_data(sfh_file)
+    n_gal = len(sfh_dicts)
 
+    # Load galprop data
+    galprop_cols = [
+        "halo_index", "birthhaloid", "roothaloid", "redshift", "sat_type",
+        "mhalo", "m_strip", "rhalo", "mstar", "mbulge", "mstar_merge",
+        "v_disk", "sigma_bulge", "r_disk", "r_bulge", "mcold", "mHI", "mH2",
+        "mHII", "Metal_star", "Metal_cold", "sfr", "sfrave20myr", "sfrave100myr",
+        "sfrave1gyr", "mass_outflow_rate", "metal_outflow_rate", "mBH",
+        "maccdot", "maccdot_radio", "tmerge", "tmajmerge", "mu_merge",
+        "t_sat", "r_fric", "x_position", "y_position", "z_position", "vx", "vy", "vz"
+    ]
+    df_galprop = pd.read_csv(galprop_file, comment='#', delim_whitespace=True, names=galprop_cols)
+
+    # Extract relevant arrays
+    bh_mass_arr = df_galprop["mBH"].to_numpy() * 1e9  # Msun
+    bh_mdot_arr = df_galprop["maccdot"].to_numpy()  # Msun/yr
+    redshift_arr = df_galprop["redshift"].to_numpy()
+    # optional: to_gal_prop_idx = np.arange(len(df_galprop))
+
+    # MPI setup
     rank = comm.Get_rank() if comm else 0
     size = comm.Get_size() if comm else 1
-    sv = subvol
+    all_indices = np.arange(n_gal)
 
-    with h5py.File(f'{sam_dir}/volume.hdf5', 'r') as file:
-        bh_mass_sub = file[f'{sv}/Galprop/GalpropMBH'][:] * 1e9
-        bh_mdot_sub1 = file[f'{sv}/Galprop/GalpropMaccdot_bright'][:]
-        bh_mdot_sub2 = file[f'{sv}/Galprop/GalpropMaccdot_radio'][:]
-        bh_mdot_sub = bh_mdot_sub1
-
-        sfh = file[f'{sv}/Histprop/HistpropSFH'][:]
-        z_hist = file[f'{sv}/Histprop/HistpropZt'][:]
-        to_gal_prop = file[f'{sv}/Linkprop/LinkproptoGalprop'][:]
-        redshift = file[f'{sv}/Linkprop/LinkpropRedshift'][:]
-        sfh_t_bins = file[f'{sv}/Header/SFH_tbins'][:]
-
-        bh_mass = bh_mass_sub[to_gal_prop]
-        bh_mdot = bh_mdot_sub[to_gal_prop]
-
-    # Apply mask: keep only galaxies with bh_mdot > 0
-    mask = bh_mdot > 0
-    bh_mass = bh_mass[mask]
-    bh_mdot = bh_mdot[mask]
-    sfh = sfh[mask]
-    z_hist = z_hist[mask]
-    redshift = redshift[mask]
-    to_gal_prop = to_gal_prop[mask]
-
-    all_indices = np.arange(len(bh_mass))
-
-    # Case 1: User requested a total of N galaxies
+    # Sample N galaxies if requested
     if N:
         if rank == 0:
-            sampled_indices = np.random.choice(all_indices, size=min(N, len(all_indices)), replace=False)
+            sampled_indices = np.random.choice(all_indices, size=min(N, n_gal), replace=False)
         else:
             sampled_indices = None
         sampled_indices = comm.bcast(sampled_indices, root=0)
     else:
         sampled_indices = all_indices
 
-    # Retrieve the LHC dust parameter sample (only on rank 0)
+    # Load LHC dust parameters
     if rank == 0:
-        lhc_file = args.lhc_file  
-        sample_index = args.sample_index  
-        dust_params = load_single_lhc_sample(lhc_file, sample_index)
+        dust_params = load_single_lhc_sample(args.lhc_file, args.sample_index)
     else:
         dust_params = None
     dust_params = comm.bcast(dust_params, root=0)
 
-    # Split work across MPI ranks evenly
+    # --- 4. Split work across ranks ---
     my_indices = np.array_split(sampled_indices, size)[rank]
-    print(f"Rank {rank}/{size}: processing {len(my_indices)} galaxies (total {len(sampled_indices)})")
-
     galaxies = []
-    for gal_idx in my_indices:
 
-        galaxy = get_single_galaxy(
-            SFH=sfh[gal_idx],
-            age_lst=sfh_t_bins,
-            Z_hist=z_hist[gal_idx],
-            bh_mass=bh_mass[gal_idx],
-            bh_mdot=bh_mdot[gal_idx],
-            z=redshift[gal_idx],
-            to_gal_prop_idx=to_gal_prop[gal_idx],
+    for idx in my_indices:
+        sfh_data = sfh_dicts[idx]
+
+        gal = get_single_galaxy(
+            SFH=sfh_data['p_imass'],
+            age_lst=age_lst,
+            Z_hist=sfh_data['p_Z'],
+            bh_mass=bh_mass_arr[idx],
+            bh_mdot=bh_mdot_arr[idx],
+            z=redshift_arr[idx],
+            to_gal_prop_idx=idx,
             **dust_params
         )
-        galaxies.append(galaxy)
+        galaxies.append(gal)
 
     return galaxies
+
 
 
 def emission_model():
