@@ -1,7 +1,14 @@
-""" Run Synthesizer pipeline with different AGN model
-e.g. mpirun -np 5 python agn_pipeline.py --nthreads 4 --subvol "0_0_0" --snap 67
+#!/usr/bin/env python3
+"""
+Run Synthesizer pipeline with different AGN model over many subvolumes efficiently.
 
-Working well with 200 GB, 20 core job, 5 ranks, 4 threads.
+Example:
+  mpirun -np 20 python agn_pipeline.py --nthreads 4 --snap 67 --all
+
+Behavior:
+  - By default runs a single subvolume (old behavior).
+  - With --all it will distribute work across MPI ranks in groups so multiple
+    subvolumes can be processed in parallel while preserving intra-subvolume MPI.
 """
 
 import argparse
@@ -30,17 +37,17 @@ from synthesizer.emission_models import (
 from synthesizer.particle.galaxy import Galaxy as ParticleGalaxy
 from synthesizer.particle.stars import Stars as ParticleStars
 from synthesizer.particle import BlackHoles
-from synthesizer.pipeline import Pipeline #, combine_files_virtual
+from synthesizer.pipeline import Pipeline
 
-# Define subvolumes
-subvolumes = [
-    "0_0_0", #
-    "0_0_1", #
-    "0_1_0", #
-    "0_1_1", #
-    "1_0_0", #
-    "1_0_1", #
-    "1_1_0", #
+# Define subvolumes (master list)
+SUBVOLUMES = [
+    "0_0_0",
+    "0_0_1",
+    "0_1_0",
+    "0_1_1",
+    "1_0_0",
+    "1_0_1",
+    "1_1_0",
     "1_1_1"
 ]
 
@@ -51,28 +58,14 @@ grid_sps_name = 'bpass-2.2.1-bin_bpl-0.1,1.0,300.0-1.3,2.35.hdf5'
 # Define a single, desired output wavelength array (e.g., 10000 points from 10 A to 1,000,000 A)
 desired_lams = np.logspace(0.1, 6, 10000) * angstrom
 
-# Load grids
+# Load grids once (shared by all groups/ranks)
 grid_agn = Grid(grid_dir=grid_dir, grid_name=grid_name, ignore_lines=True, new_lam=desired_lams)
 grid_sps = Grid(grid_dir=grid_dir, grid_name=grid_sps_name, ignore_lines=True, new_lam=desired_lams)
 
 def get_sfh_data(filename):
     """
     Load an SCSAM sfhist_*.dat file containing one or more galaxies.
-
-    File structure example:
-        0.3 0.6711              <-- cosmology (Omega_m, h)
-        1405                    <-- number of age bins
-        <1405 age bin values>   <-- in Gyr
-        # 54 ... 0.227446       <-- start of galaxy block (redshift = 0.227446)
-        <1405 lines of "SFH  Z"> per galaxy
-         
-    Uses 2D NumPy arrays for fast access.
-
-    Returns:
-        age_lst   : np.ndarray of age bins (same for all galaxies)
-        sfh_arr   : np.ndarray, shape (n_gal, n_age_bins)
-        Z_arr     : np.ndarray, shape (n_gal, n_age_bins)
-        redshifts : np.ndarray, shape (n_gal,)
+    See docstring in original script for format details.
     """
     with open(filename, 'r') as f:
         lines = f.readlines()
@@ -113,12 +106,11 @@ def get_sfh_data(filename):
         else:
             line_idx += 1
 
+    # Return arrays and the first redshift value (original code used redshifts[0])
     return age_values, sfh_arr, Z_arr, redshifts[0]
 
 def get_single_galaxy(SFH, age_lst, Z_hist, z, bh_mass, bh_mdot, to_galprop_idx):
-    """Create a particle-based galaxy using Synthesizer using the SC-SAM data
-    loaded in get_galaxies."""
-
+    """Create a particle-based galaxy using Synthesizer using the SC-SAM data"""
     stars = ParticleStars(
         initial_masses=SFH * 1e9 * Msun,
         ages=age_lst * 1e9 * yr,
@@ -132,10 +124,7 @@ def get_single_galaxy(SFH, age_lst, Z_hist, z, bh_mass, bh_mdot, to_galprop_idx)
 
     # Pick a random cosine inclination between 0.1 and 0.98
     cosine_inc = random.uniform(0.1, 0.98)
-
-    # Convert to inclination in degrees
     inc_deg = math.acos(cosine_inc) * (180 / math.pi)
-
     black_holes.inclination = inc_deg * deg 
 
     gal = ParticleGalaxy(
@@ -149,16 +138,14 @@ def get_single_galaxy(SFH, age_lst, Z_hist, z, bh_mass, bh_mdot, to_galprop_idx)
 def get_galaxies(sfh_file, galprop_file, N=None, comm=None):
     """
     Load galaxies using SFH .dat and corresponding galprop .dat for non-SFH properties,
-    distributing the galaxies across MPI ranks.
-    Returns a list of ParticleGalaxy objects.
+    distributing the galaxies across MPI ranks (using comm).
+    Returns a list of ParticleGalaxy objects local to this rank/comm.
     """
-
     rank = comm.Get_rank() if comm else 0
     size = comm.Get_size() if comm else 1
 
     # Load SFH data
     sfh_t_bins, sfh, z_hist, redshift = get_sfh_data(sfh_file)
-    n_gal = sfh.shape[0]
 
     # Load galprop data
     galprop_cols = [
@@ -172,28 +159,32 @@ def get_galaxies(sfh_file, galprop_file, N=None, comm=None):
     ]
     df_galprop = pd.read_csv(galprop_file, comment='#', delim_whitespace=True, names=galprop_cols)
 
-    # n galprop rows > n sfh rows
-    # For each array in sfh_arr we want the corresponding data in galprop
-    # Get indices in galprop sfh_to_galprop where redshift_sfh == redshift_prop
-    # Use these indices to get bBH, maccdot
-
     # Find galprop rows with redshifts matching SFH redshift
-    # (using a small tolerance for float comparisons)
-    tol = 1e-4
-    to_galprop = np.where(
-        np.isclose(df_galprop["redshift"].to_numpy(), redshift, atol=tol)
-    )[0]
+    z_sfh = float(redshift)  # ensure scalar, not array
+    to_galprop = np.where(np.isclose(df_galprop["redshift"].to_numpy(), z_sfh, atol=1e-4))[0]
     
-    # Safety check
     if len(to_galprop) == 0:
         raise ValueError(f"No matching redshifts found between {sfh_file} and {galprop_file}")
     
-    bh_mass = df_galprop["mBH"][to_galprop]
-    bh_mdot = df_galprop["maccdot"][to_galprop]
+    print('N SFH gals:', len(sfh))
+    print('N galprop gals:', len(df_galprop["mBH"].to_numpy()))
+    
+    bh_mass = df_galprop["mBH"].to_numpy()[to_galprop]
+    bh_mdot = df_galprop["maccdot"].to_numpy()[to_galprop]
 
-    all_indices = np.arange(n_gal)
+    print('N aligned gals:', len(bh_mdot))
 
-    # Case 1: Request a total of N galaxies
+    # Apply mask: keep only galaxies with bh_mdot > 0
+    mask = bh_mdot > 0
+    bh_mdot = bh_mdot[mask]
+    bh_mass = bh_mass[mask]
+    sfh = sfh[mask]
+    z_hist = z_hist[mask]
+    to_galprop = to_galprop[mask]
+
+    all_indices = np.arange(len(bh_mass))
+
+    # Case 1: Request a total of N galaxies (random sample)
     if N:
         if rank == 0:
             sampled_indices = np.random.choice(all_indices, size=min(N, len(all_indices)), replace=False)
@@ -205,12 +196,10 @@ def get_galaxies(sfh_file, galprop_file, N=None, comm=None):
     else:
         indices = all_indices
 
-    # Split indices evenly across MPI ranks
+    # Split indices evenly across MPI ranks of this communicator
     my_indices = np.array_split(indices, size)[rank]
 
-    # Debug print
-    print(f"Rank {rank}/{size}: processing {len(my_indices)} galaxies "
-          f"(total {len(indices)})")
+    print(f"[comm {comm.rank if comm else 0}/{comm.size if comm else 1}] processing {len(my_indices)} galaxies (total {len(indices)})")
 
     galaxies = [
         get_single_galaxy(SFH=sfh[i],
@@ -227,7 +216,6 @@ def get_galaxies(sfh_file, galprop_file, N=None, comm=None):
 
 def emission_model():
     """Define combined emission model using loaded grids."""
-
     stellar_incident = StellarEmissionModel(
         "stellar_incident", grid=grid_sps, extract="incident", fesc=1.0
     )
@@ -239,46 +227,41 @@ def emission_model():
     )
     return combined_emission
 
+def process_subvolume(subvol, snap, nthreads, N, comm_sub, sam_dir, out_dir):
+    """
+    Process a single subvolume using communicator comm_sub (which may be MPI.COMM_NULL
+    if single-rank/no-parallelism).
+    """
+    rank = comm_sub.Get_rank() if comm_sub else 0
+    size = comm_sub.Get_size() if comm_sub else 1
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Derive synthetic observations for SC-SAM.")
-    parser.add_argument("--nthreads", type=int, default=1)
-    # Total N of galaxies to process, randomly chosen
-    parser.add_argument("--N", type=int, default=None) 
-    parser.add_argument("--subvol", type=str, default="0_0_0")
-    parser.add_argument("--snap", type=str, default=67)
-    args = parser.parse_args()
+    sfh_file = f'{sam_dir}/{subvol}/sfhist_{snap}-{snap}.dat'
+    galprop_file = f'{sam_dir}/{subvol}/galprop_{snap}-{snap}.dat'
 
-    nthreads = args.nthreads
-    N = args.N
-    subvolume = args.subvol
-    snap = args.snap
+    # Basic file checks on rank 0 of the communicator (if communicators exist)
+    if (comm_sub is None) or (rank == 0):
+        if not os.path.exists(sfh_file):
+            raise FileNotFoundError(f"SFH file not found: {sfh_file}")
+        if not os.path.exists(galprop_file):
+            raise FileNotFoundError(f"Galprop file not found: {galprop_file}")
 
-    sam_dir = '/mnt/ceph/users/lperez/AGNmodelingSCSAM/sam_newAGNcode_multizs_Sophie'
-    sfh_file = f'{sam_dir}/{subvolume}/sfhist_{snap}-{snap}.dat'
-    galprop_file = f'{sam_dir}/{subvolume}/galprop_{snap}-{snap}.dat'
+    comm_sub.Barrier() if comm_sub else None
 
-    # MPI info
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-
-    # Load galaxies
+    # Load galaxies (this function uses the comm_sub to split work)
     read_start = time.time()
-    galaxies = get_galaxies(sfh_file=sfh_file, galprop_file=galprop_file, N=N, comm=comm)
+    galaxies = get_galaxies(sfh_file=sfh_file, galprop_file=galprop_file, N=N, comm=comm_sub)
     read_end = time.time()
-    print(f"Rank {rank}: Creating {len(galaxies)} galaxies took {read_end - read_start:.2f} s")
+    if comm_sub:
+        print(f"[subvol {subvol}] comm {comm_sub.Get_rank()}/{comm_sub.Get_size()}: Creating {len(galaxies)} galaxies took {read_end - read_start:.2f} s")
+    else:
+        print(f"[subvol {subvol}] single-rank: Created {len(galaxies)} galaxies in {read_end - read_start:.2f} s")
 
-    # Set emission model
+    # Build emission model and pipeline (one per subvolume)
     model = emission_model()
-
-    # Start Pipeline
-    pipeline = Pipeline(emission_model=model, nthreads=nthreads, verbose=1, comm=comm)
+    pipeline = Pipeline(emission_model=model, nthreads=nthreads, verbose=1, comm=comm_sub)
     pipeline.add_galaxies(galaxies)
     pipeline.get_spectra()
-    #pipeline.get_observed_spectra(cosmo=cosmo)
 
-    # Add galaxy info
     pipeline.add_analysis_func(lambda gal: gal.redshift, "Redshift")
     pipeline.add_analysis_func(lambda gal: gal.black_holes.mass, "BlackHoleMass")
     pipeline.add_analysis_func(lambda gal: gal.black_holes.accretion_rate, "AccretionRate")
@@ -286,4 +269,104 @@ if __name__ == "__main__":
     pipeline.add_analysis_func(lambda gal: gal.to_galprop_idx, "GalPropIndex")
 
     pipeline.run()
-    pipeline.write(f"/mnt/home/snewman/ceph/pipeline_results/pipeline_agn_snap{snap}.hdf5", verbose=0)
+
+    out_fname = os.path.join(out_dir, f"pipeline_agn_snap{snap}_subvol_{subvol}.hdf5")
+
+    if comm_sub:
+        pipeline.write(out_fname, verbose=0)
+        print(f"[subvol {subvol}] rank finished writing")
+    else:
+        pipeline.write(out_fname, verbose=0)
+        print(f"[subvol {subvol}] finished writing")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Derive synthetic observations for SC-SAM across subvolumes.")
+    parser.add_argument("--nthreads", type=int, default=1)
+    parser.add_argument("--N", type=int, default=None, help="Total N of galaxies to process (random sample).")
+    parser.add_argument("--subvol", type=str, default=None, help="Single subvolume to run (e.g. '0_0_0').")
+    parser.add_argument("--snap", type=str, default="67")
+    parser.add_argument("--all", action="store_true", help="Process all subvolumes from the SUBVOLUMES list.")
+    parser.add_argument("--outdir", type=str, default="/mnt/home/snewman/ceph/pipeline_results", help="Output directory for pipeline results.")
+    parser.add_argument("--samdir", type=str, default='/mnt/ceph/users/lperez/AGNmodelingSCSAM/sam_newAGNcode_multizs_Sophie', help="Base SAM directory containing subvolume folders.")
+    args = parser.parse_args()
+
+    nthreads = args.nthreads
+    N = args.N
+    snap = args.snap
+    out_dir = args.outdir
+    sam_dir = args.samdir
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # choose subvolumes to process
+    if args.subvol and not args.all:
+        target_subvols = [args.subvol]
+    elif args.all:
+        target_subvols = SUBVOLUMES.copy()
+    else:
+        # default fallback: if none provided, process first subvol (preserves backward compatibility)
+        target_subvols = [SUBVOLUMES[0]]
+
+    n_sub = len(target_subvols)
+
+    # Determine number of groups (one group per concurrent subvolume up to available ranks)
+    groups = min(n_sub, size)
+    if groups < 1:
+        groups = 1
+
+    # Split ranks into contiguous groups
+    rank_groups = np.array_split(np.arange(size), groups)
+    my_group_id = None
+    for gid, ranks in enumerate(rank_groups):
+        if rank in ranks:
+            my_group_id = gid
+            break
+
+    # Split subvolumes across groups (each group gets one or more subvolumes)
+    subvol_groups = np.array_split(target_subvols, groups)
+    # Determine if this group actually has any subvolumes
+    my_subvols = list(subvol_groups[my_group_id]) if my_group_id is not None else []
+
+    # If my_subvols is empty then this group should not participate (set color undefined)
+    if len(my_subvols) == 0:
+        # create no communicator for work
+        comm_sub = None
+        print(f"Rank {rank}: assigned to group {my_group_id} but no subvolumes -> idle for pipeline work.")
+    else:
+        # Create an intra-communicator for this group
+        color = my_group_id
+        comm_sub = comm.Split(color=color, key=rank)
+        print(f"Rank {rank}: joined comm_sub (group {my_group_id}) with size {comm_sub.Get_size()} and will process subvolumes {my_subvols}")
+
+    # Ensure output directory exists (only do on MPI rank 0 of WORLD)
+    if rank == 0 and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+    comm.Barrier()
+
+    # Each group processes its assigned subvolumes sequentially using comm_sub
+    if comm_sub is None:
+        # This rank has nothing to do (no subvolumes in its group)
+        pass
+    else:
+        for subvol in my_subvols:
+            try:
+                process_subvolume(subvol=subvol, snap=snap, nthreads=nthreads, N=N, comm_sub=comm_sub, sam_dir=sam_dir, out_dir=out_dir)
+            except Exception as e:
+                # Report error to world rank 0 and continue (avoid silent termination on one rank)
+                print(f"[group {my_group_id} rank {comm_sub.Get_rank()}] Error processing subvol {subvol}: {e}")
+            # small barrier between subvolumes to synchronize group ranks
+            comm_sub.Barrier()
+
+        # Free the communicator
+        comm_sub.Free()
+
+    # Final barrier and exit
+    comm.Barrier()
+    if rank == 0:
+        print("All subvolume processing complete.")
+
+if __name__ == "__main__":
+    main()
