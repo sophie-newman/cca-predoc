@@ -55,7 +55,7 @@ desired_lams = np.logspace(0.1, 6, 10000) * angstrom
 grid_agn = Grid(grid_dir=grid_dir, grid_name=grid_name, ignore_lines=True, new_lam=desired_lams)
 grid_sps = Grid(grid_dir=grid_dir, grid_name=grid_sps_name, ignore_lines=True, new_lam=desired_lams)
 
-def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx, to_gal_prop_snap):
+def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx, to_gal_prop_snap, galprop_sfr, galprop_stellar_mass):
     """Create a particle-based galaxy using Synthesizer using the SC-SAM data
     loaded in get_galaxies."""
 
@@ -93,7 +93,9 @@ def get_single_galaxy(SFH, age_lst, Z_hist, bh_mass, bh_mdot, z, to_gal_prop_idx
         to_gal_prop_idx = to_gal_prop_idx,
         to_gal_prop_snap = to_gal_prop_snap,
         stars = stars, 
-        black_holes = black_holes)
+        black_holes = black_holes,
+        galprop_sfr = galprop_sfr,
+        galprop_stellar_mass=galprop_stellar_mass)
 
     return gal
 
@@ -124,9 +126,14 @@ def get_galaxies(subvol="0_0_0", N=None, comm=None):
 
         sfh_t_bins = file[f'{sv}/Header/SFH_tbins'][:]
 
+        sfr = file[f'{sv}/Galprop/GalpropSFRave_100Myr'][:]
+        stellar_mass = file[f'{sv}/Galprop/GalpropMstar'][:] * 1e9
+
         # Align galaxy properties using mapping
         bh_mass = bh_mass_sub[to_gal_prop]
         bh_mdot = bh_mdot_sub[to_gal_prop]
+        sfr = sfr[to_gal_prop]
+        stellar_mass = stellar_mass[to_gal_prop]
 
     # Apply mask: keep only galaxies with bh_mdot > 0
     print(f'{len(bh_mdot)} galaxies before cut')
@@ -138,6 +145,8 @@ def get_galaxies(subvol="0_0_0", N=None, comm=None):
     redshift = redshift[mask]
     to_gal_prop = to_gal_prop[mask]
     to_gal_prop_snapshot = to_gal_prop_snapshot[mask]
+    sfr = sfr[mask]
+    stellar_mass = stellar_mass[mask]
     print(f'{len(bh_mdot)} galaxies after cut')
 
     all_indices = np.arange(len(bh_mass))
@@ -170,6 +179,8 @@ def get_galaxies(subvol="0_0_0", N=None, comm=None):
                           z=redshift[i],
                           to_gal_prop_idx=to_gal_prop[i],
                           to_gal_prop_snap=to_gal_prop_snapshot[i],
+                          galprop_sfr=sfr[i],
+                          galprop_stellar_mass=stellar_mass[i]
                           )
         for i in my_indices
     ]
@@ -230,6 +241,8 @@ if __name__ == "__main__":
     pipeline.add_analysis_func(lambda gal: gal.black_holes.inclination, "InclinationDeg")
     pipeline.add_analysis_func(lambda gal: gal.to_gal_prop_idx, "GalPropIndex")
     pipeline.add_analysis_func(lambda gal: gal.to_gal_prop_snap, "GalPropSnap")
+    pipeline.add_analysis_func(lambda gal: gal.galprop_sfr, "GalPropSFRave_100Myr")
+    pipeline.add_analysis_func(lambda gal: gal.galprop_stellar_mass, "GalPropMstar")
 
     pipeline.run()
     pipeline.write(f"/mnt/home/snewman/ceph/pipeline_results/pipeline_agn_allz_{subvolume}.hdf5", verbose=0)
