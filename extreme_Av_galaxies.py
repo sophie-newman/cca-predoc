@@ -8,8 +8,8 @@ mpl.rcParams.update({'font.size': 16})
 
 # First let's get all of the local SAM galaxies to compare our most extreme galaxies to
 
-sam_dir = '/mnt/ceph/users/lperez/AGNmodelingSCSAM/sam_newAGNcode_allzs_Sophie/h5files'
-#sam_dir = '/mnt/ceph/users/lperez/CAMELS-SAM-phot/CV/CV_1/fid-sam_oldAGN/h5files'
+#sam_dir = '/mnt/ceph/users/lperez/AGNmodelingSCSAM/sam_newAGNcode_allzs_Sophie/h5files'
+sam_dir = '/mnt/ceph/users/lperez/CAMELS-SAM-phot/CV/CV_1/fid-sam_oldAGN/h5files'
 sv = "0_0_0"
 
 with h5py.File(f'{sam_dir}/volume.hdf5', 'r') as f:
@@ -17,11 +17,12 @@ with h5py.File(f'{sam_dir}/volume.hdf5', 'r') as f:
 
     # Load redshift first to make the mask
     redshift = group['GalpropRedshift'][:]
-    redshift_mask = (redshift >= 0) & (redshift < 0.1)
+    sat_type = group['GalpropSatType'][:].astype(int).squeeze() # 0 - central, 1 - satellite
+    redshift_mask = (redshift >= 0) & (redshift < 0.1) # & (sat_type == 0)
 
     # Load only the subset you need using the mask
     stellar_mass = group['GalpropMstar'][:][redshift_mask] * 1e9 # Msolar
-    metal_mass = group['GalpropZstar'][:][redshift_mask] * 1e9 # Msolar Zsolar
+    metal_mass = group['GalpropZcold'][:][redshift_mask] * 1e9 # Msolar Zsolar
     disk_radius = group['GalpropRdisk'][:][redshift_mask] # kpc
     halo_radius = group['GalpropRhalo'][:][redshift_mask] # Mpc
     gas_mass = group['GalpropMcold'][:][redshift_mask] * 1e9 # Msolar
@@ -115,6 +116,10 @@ for i, (data, xlabel) in enumerate(properties):
     mask = np.isfinite(data) & (data > 0)
     data_masked = data[mask]
 
+    if len(data_masked) == 0:
+        print(f"Skipping {xlabel} because no valid data.")
+        continue  # Skip empty arrays
+
     # Define log bins
     n_bins = 50
     log_min = np.log10(data_masked.min())
@@ -149,6 +154,7 @@ plt.savefig('/mnt/home/snewman/extreme_Av_galaxies.png', dpi=300, bbox_inches='t
 plt.show()
 
 
+"""
 
 
 # ---------------------------------------------------------------------
@@ -172,7 +178,36 @@ bins = np.logspace(log_min, log_max, n_bins)
 # Plot histogram
 ax_ratio.hist(data_masked, bins=bins, alpha=0.7, color='lemonchiffon', edgecolor='black')
 
+# ---------------------------------------------------------------------
+# Compute and plot σ (standard deviation) lines in log space
+# ---------------------------------------------------------------------
+log_data = np.log10(data_masked)
+mean_log = np.mean(log_data)
+std_log = np.std(log_data)
+
+# σ-levels (convert back to linear space for plotting)
+sigma_levels = {
+    "mean": 10**mean_log,
+    "1σ lower": 10**(mean_log - std_log),
+    "1σ upper": 10**(mean_log + std_log),
+    "2σ lower": 10**(mean_log - 2*std_log),
+    "2σ upper": 10**(mean_log + 2*std_log),
+    "3σ lower": 10**(mean_log - 3*std_log),
+    "3σ upper": 10**(mean_log + 3*std_log),
+}
+
+# Plot mean and sigma lines
+ax_ratio.axvline(sigma_levels["mean"], color='black', linestyle='-', linewidth=2.5, label='Mean')
+ax_ratio.axvline(sigma_levels["1σ lower"], color='gray', linestyle='--', linewidth=1.5, label='1σ')
+ax_ratio.axvline(sigma_levels["1σ upper"], color='gray', linestyle='--', linewidth=1.5)
+ax_ratio.axvline(sigma_levels["2σ lower"], color='dimgray', linestyle='-.', linewidth=1.2, label='2σ')
+ax_ratio.axvline(sigma_levels["2σ upper"], color='dimgray', linestyle='-.', linewidth=1.2)
+ax_ratio.axvline(sigma_levels["3σ lower"], color='darkslategray', linestyle=':', linewidth=1.2, label='3σ')
+ax_ratio.axvline(sigma_levels["3σ upper"], color='darkslategray', linestyle=':', linewidth=1.2)
+
+# ---------------------------------------------------------------------
 # Mark top 5 Av galaxies
+# ---------------------------------------------------------------------
 for j, idx in enumerate(top5_idx):
     val = ratio_kpc[idx]
     if np.isfinite(val) and val > 0:
@@ -186,6 +221,10 @@ ax_ratio.set_xlabel(r'$\rm R_{halo} / R_{disk}$', fontsize=12)
 ax_ratio.set_ylabel('N Galaxies', fontsize=12)
 ax_ratio.tick_params(axis='both', which='major', labelsize=10)
 ax_ratio.legend(fontsize=9, loc='best', frameon=False)
+ax_ratio.set_title(r'$\rm R_{halo} / R_{disk}$ Distribution with $\sigma$ Levels', fontsize=14)
+
 fig_ratio.tight_layout()
 plt.savefig('/mnt/home/snewman/halo_to_disk_ratio.png', dpi=300, bbox_inches='tight')
 plt.show()
+
+"""
